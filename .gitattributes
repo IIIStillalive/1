@@ -1,0 +1,2 @@
+# 统一换行符为 LF（本项目在 Linux/WSL 下编译，Windows 编辑时也别转 CRLF）
+* text=auto eol=lf
