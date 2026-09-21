@@ -20,3 +20,6 @@ add_executable(server
 )
 
 target_compile_features(server PRIVATE cxx_std_20)
+
+# 头文件搜索路径:让 #include "server/xxx.hpp" 能找到
+target_include_directories(server PRIVATE ${CMAKE_SOURCE_DIR}/include)

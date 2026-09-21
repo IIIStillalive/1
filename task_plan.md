@@ -10,7 +10,7 @@
 - [x] 项目结构 + CMake 能 build + run 烟测（输出 Stage 0 skeleton OK）
 - [x] 第一课 RAII：NonCopyable 基类（含 const 正确性、namespace server，已验证禁止拷贝）
 - [x] 第一课 RAII：ErrnoGuard 错误处理封装（含 errno 是宏、恢复契约=构造瞬间值）
-- [ ] 第二课：模块化日志
+- [x] 第二课：模块化日志（单例、折叠表达式、两阶段查找、声明顺序；已接入 main 构建运行）
 - [ ] git init + 首次提交
 
 ### Stage 1 — 阻塞回显服务器
