@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(high_perf_server VERSION 0.1 LANGUAGES CXX)
 
 # ---- 语言标准：C++20（gs 时代，充分支持） ----
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

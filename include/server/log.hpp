@@ -1,4 +1,4 @@
-#pragma once 
+#pragma once
 
 
 #include <sstream>
@@ -39,7 +39,7 @@ public:
     }
 private:
     Logger() = default; //私有只能由instance 创建
-    void do_log(Level lv, const std::string& name);
+    void do_log(Level lv, const std::string& msg);
     Level level_ = Level::INFO;
 };
 
