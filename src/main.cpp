@@ -9,17 +9,31 @@
 #include "server/socket.hpp"
 #include <sys/epoll.h>
 #include <unordered_map>
+#include <fcntl.h>
 
 using namespace server;
+// 定义自由函数 set_nonblocking
+inline bool set_nonblocking(int fd) {
+    int old_flags = ::fcntl(fd, F_GETFL, 0);
+    if (old_flags < 0) return false;
+    return ::fcntl(fd, F_SETFL, old_flags | O_NONBLOCK) >= 0;
+}
 
 //连接柜
 std::unordered_map<int,Socket> conns;
+
+
 int main() {
     auto& log = Logger::instance();
     log.set_level(Level::TRACE);
     log.log(Level::INFO, "server booting up");
 
     Socket lfd(::socket(AF_INET, SOCK_STREAM, 0));
+    if(!::set_nonblocking(lfd.get())){
+        ErrnoGuard eg;
+        log.log(Level::ERROR, "::fcntl() failed:", eg.message());
+        return -1;
+    }
     if (!lfd.valid()) {                                   // ① valid()
         ErrnoGuard eg;
         log.log(Level::ERROR, "socket() failed:", eg.message());
@@ -46,11 +60,19 @@ int main() {
     log.log(Level::INFO, "listening on 127.0.0.1:8888");
 
     int epfd = ::epoll_create1(0);
+    if(epfd < 0){
+        ErrnoGuard eg;
+        log.log(Level::ERROR, "::epoll_create1() failed:", eg.message());
+        return -1; 
+    }
     struct epoll_event ev{};
     ev.data.fd = lfd.get();
-    ev.events = EPOLLIN;
-    ::epoll_ctl(epfd, EPOLL_CTL_ADD, lfd.get(), &ev);
-
+    ev.events = EPOLLIN | EPOLLET;
+    if((::epoll_ctl(epfd, EPOLL_CTL_ADD, lfd.get(), &ev)) < 0){
+        ErrnoGuard eg;
+        log.log(Level::ERROR, "::epoll_ctl(EPOLL_CTL_ADD) failed:", eg.message());
+        return -1; 
+    }
     epoll_event ready[16];
 
     while(true){
@@ -59,26 +81,63 @@ int main() {
             int fd = ready[i].data.fd;
             
             if(fd == lfd.get()){
-                int cfd = ::accept(lfd.get(), nullptr, nullptr);
-                if(cfd >= 0){
-                    conns.emplace(cfd, Socket(cfd));
-                    epoll_event cev{}; cev.events = EPOLLIN; cev.data.fd = cfd;
-                    ::epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &cev);
-                    log.log(Level::INFO, "accept new conn fd=", cfd);
+                while(true){
+                    int cfd = ::accept(lfd.get(), nullptr, nullptr);
+                    if(cfd >= 0){
+                        if(!::set_nonblocking(cfd)){
+                            ErrnoGuard eg;
+                            log.log(Level::ERROR, "::fcntl() failed:", eg.message());
+                            return -1;
+                        }
+                        conns.emplace(cfd, Socket(cfd));
+                        epoll_event cev{}; cev.events = EPOLLIN | EPOLLET; cev.data.fd = cfd;
+                        ::epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &cev);
+                        log.log(Level::INFO, "accept new conn fd=", cfd);
+                    }
+                    else{
+                        if(errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        ErrnoGuard eg;
+                        log.log(Level::ERROR, "::accept() failed:", eg.message());
+                        return -1; 
+                    }
                 }
             } 
             else{
                 char buf[4096];
-                memset(&buf, 0, sizeof(buf));
-                ssize_t r = ::read(fd, buf, sizeof(buf));
-                if(r > 0){
-                    ::write(fd, buf, static_cast<size_t>(r));
+                
+                while(true){
+                    memset(&buf, 0, sizeof(buf));
+                    ssize_t r = ::read(fd, buf, sizeof(buf));
+                    if(r > 0){
+                        log.log(Level::INFO, "recv: ", r, "bytes");
+                        ::write(fd, buf, static_cast<size_t>(r));
+                    }
+                    else if(r == 0){
+                        if(::epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr) < 0){
+                            ErrnoGuard eg;
+                            log.log(Level::ERROR, "::epoll_ctl(EPOLL_CTL_DEL) failed:", eg.message());
+                            return -1; 
+                        }
+                        conns.erase(fd);
+                        log.log(Level::INFO, "closed fd=", fd);
+                        break;
+                    }
+                    else if(errno == EAGAIN || errno == EWOULDBLOCK){
+                        break;
+                    }
+                    else{
+                        ErrnoGuard eg;
+                        log.log(Level::ERROR, "::read() failed:", eg.message());
+                        if(::epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr) < 0){
+                            ErrnoGuard eg1;
+                            log.log(Level::ERROR, "::epoll_ctl(EPOLL_CTL_DEL) failed:", eg1.message());
+                            return -1; 
+                        }
+                        conns.erase(fd);
+                        return -1; 
+                    }
                 }
-                else{
-                    ::epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
-                    conns.erase(fd);
-                    log.log(Level::INFO, "closed fd=", fd);
-                }
+
             }
         }
     }
