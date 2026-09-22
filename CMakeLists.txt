@@ -24,3 +24,11 @@ target_compile_features(server PRIVATE cxx_std_20)
 
 # 头文件搜索路径:让 #include "server/xxx.hpp" 能找到
 target_include_directories(server PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# ---- 目标：epoll 探针(独立验证用,不参与 server 构建) ----
+add_executable(epoll_probe
+  src/epoll_probe.cpp
+)
+
+target_compile_features(epoll_probe PRIVATE cxx_std_20)
+target_include_directories(epoll_probe PRIVATE ${CMAKE_SOURCE_DIR}/include)
