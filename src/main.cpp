@@ -7,8 +7,13 @@
 #include "server/log.hpp"
 #include "server/errno.hpp"
 #include "server/socket.hpp"
+#include <sys/epoll.h>
+#include <unordered_map>
+
 using namespace server;
 
+//连接柜
+std::unordered_map<int,Socket> conns;
 int main() {
     auto& log = Logger::instance();
     log.set_level(Level::TRACE);
@@ -40,27 +45,42 @@ int main() {
     }
     log.log(Level::INFO, "listening on 127.0.0.1:8888");
 
-    Socket cfd(::accept(lfd.get(), nullptr, nullptr));    // ④ get()
-    if (!cfd.valid()) {
-        ErrnoGuard eg;
-        log.log(Level::ERROR, "accept() failed:", eg.message());
-        return -1;
-    }
+    int epfd = ::epoll_create1(0);
+    struct epoll_event ev{};
+    ev.data.fd = lfd.get();
+    ev.events = EPOLLIN;
+    ::epoll_ctl(epfd, EPOLL_CTL_ADD, lfd.get(), &ev);
 
-    char buf[4096];
-    for (;;) {
-        ssize_t n = ::read(cfd.get(), buf, sizeof(buf));  // ⑤ 读用 get()
-        if (n == 0) {
-            log.log(Level::INFO, "peer closed the connection");
-            break;
+    epoll_event ready[16];
+
+    while(true){
+        int n = ::epoll_wait(epfd, ready, 16, -1);
+        for(int i = 0; i < n; i++){
+            int fd = ready[i].data.fd;
+            
+            if(fd == lfd.get()){
+                int cfd = ::accept(lfd.get(), nullptr, nullptr);
+                if(cfd >= 0){
+                    conns.emplace(cfd, Socket(cfd));
+                    epoll_event cev{}; cev.events = EPOLLIN; cev.data.fd = cfd;
+                    ::epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &cev);
+                    log.log(Level::INFO, "accept new conn fd=", cfd);
+                }
+            } 
+            else{
+                char buf[4096];
+                memset(&buf, 0, sizeof(buf));
+                ssize_t r = ::read(fd, buf, sizeof(buf));
+                if(r > 0){
+                    ::write(fd, buf, static_cast<size_t>(r));
+                }
+                else{
+                    ::epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
+                    conns.erase(fd);
+                    log.log(Level::INFO, "closed fd=", fd);
+                }
+            }
         }
-        if (n < 0) {
-            ErrnoGuard eg;
-            log.log(Level::ERROR, "read() failed:", eg.message());
-            break;
-        }
-        log.log(Level::INFO, "recv ", n, " bytes, echoing back");
-        ::write(cfd.get(), buf, static_cast<size_t>(n));  // ⑥ 写用 get()
     }
-    return 0;                                             // ⑦ Socket 析构自动 close
+    return 0;                                             
 }
