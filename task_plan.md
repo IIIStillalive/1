@@ -14,21 +14,21 @@
 - [ ] git init + 首次提交
 
 ### Stage 1 — 阻塞回显服务器
-- [ ] socket/bind/listen/accept
-- [ ] 回显 read/write
+- [x] socket/bind/listen/accept
+- [x] 回显 read/write
 - [ ] GDB 实战：断点、backtrace
 
 ### Stage 2 — 非阻塞 + epoll
-- [ ] O_NONBLOCK
-- [ ] epoll LT 实现
-- [ ] epoll ET 实现 + 与 LT 对比
-- [ ] EAGAIN 处理
+- [x] O_NONBLOCK
+- [x] epoll LT 实现
+- [x] epoll ET 实现 + 与 LT 对比
+- [x] EAGAIN 处理
 
 ### Stage 3 — 单线程 Reactor
-- [ ] 事件循环
-- [ ] fd → handler 注册表
-- [ ] 回调分发
-- [ ] 连接生命周期管理
+- [x] 事件循环
+- [x] fd → handler 注册表
+- [x] 回调分发
+- [x] 连接生命周期管理
 
 ### Stage 4 — 多线程线程池
 - [ ] 线程安全任务队列
