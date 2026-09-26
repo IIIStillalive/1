@@ -32,6 +32,20 @@
 - 远端 `origin` = github.com/IIIStillalive/1，分支 `main`，已同步（`2f95f02..f20bc38`）。
 - 用户本人负责以后所有 cmake/git 操作。
 
-## 下次：Stage 4 — 多线程线程池
-动机预览：现在单线程 Reactor 一个线程串行处理 accept/read/echo。若 echo 逻辑是耗时计算或阻塞 I/O，整个循环卡住（一个慢连接拖垮全部）。阶段引入：**线程安全任务队列（mutex + condition_variable）+ 固定线程池 + 事件循环把"耗时任务"投递到工作线程**。
-衔接点：Stage 3 的 EventLoop 只负责 epoll 就绪唤醒，不碰计算——这正好成为"事件线程只做非阻塞、耗时的丢给池子"的切分基础。
+## Stage 4 — 多线程线程池（进行中）
+**动机**：单线程 Reactor 一个线程串行处理 accept/read/echo。若 echo 逻辑是耗时计算或阻塞 I/O，整个 `run()` 循环卡住（一个慢连接拖垮全部）。引入：**线程安全任务队列（mutex + condition_variable）+ 固定线程池 + 事件循环把"耗时任务"投递到工作线程**。
+
+**线程池四问（已讲透）**：
+1. **worker 循环**：`std::unique_lock lk(mtx_); cv_.wait(lk, pred)` + 花括号取完即放锁，执行 `task()` 在锁外。`wait` 带谓词防假唤醒（spurious wakeup）；退出条件是 `stop_ && tasks_.empty()`（活干完才走，别丢任务）。
+2. **submit 的 notify_one**：push 必须持锁（共享队列），notify **放锁外**（只发信号，不碰数据，减竞争）。不 notify → 任务堆在队列里 worker 永远不知道，**最闷的哑弹 bug**。
+3. **析构顺序**：先锁内 `stop_=true` → 再 `cv_.notify_all()` → 后 `join()`。反了会**死锁**：先 notify 时 stop_ 还是 false，worker 醒来看谓词为假又睡回去，之后设 stop_ 却再没人摇醒它，join 永远等不到。改共享标志必须持锁（防数据竞争 UB）。
+4. **锁粒度（最易错）**：等任务时锁是 `wait` 放开的（别人能 push）；**执行任务时绝不持锁**——持锁会串行化所有任务 + 任务内再 submit 自己锁死自己。锁的范围 = "摸队列那一瞬"，用一对花括号 + RAII 提前解锁。
+- **三态口诀**：worker 锁内看状态、见眠则睡、取完即放；生产者锁内投递、出锁叫醒；老板锁内改令、出锁广播、锁外等待。
+- **生产/消费角色分工**：worker 要临时放锁（wait）→ `unique_lock`；submit/析构短持锁不放 → `lock_guard`。
+
+**达成布局**：`include/server/thread_pool.hpp`（声明 ThreadPool，网络无关，暂不接 EventLoop）。
+
+## 下次：Stage 4 续 — 实现 thread_pool.hpp + 接入 EventLoop
+- 用户亲自声明 + 实现 ThreadPool（类成员：workers_/tasks_/mtx_/cv_/stop_）。
+- 接入：事件循环把耗时任务 `submit` 到线程池，事件线程只做非阻塞。
+衔接点：ThreadPool 是纯通用的；把它喂给 EventLoop 的回调（echo 若变重计算就走池子）。

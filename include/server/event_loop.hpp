@@ -7,39 +7,66 @@
 #include <cstring>
 #include <cerrno>
 #include "server/channel.hpp"
+#include "server/tcp_connection.hpp"
 
 namespace server {
 
-// 只认识通用 Channel（fd→分发）；完全不认识任何业务连接类型。
+// 只负责事件就绪 → 分发到对应处理单元。
+// 用 epoll 的 ev.data.ptr 直接记对象指针，分发时免查表：
+//   监听 fd → Channel；业务连接 → TcpConnection（它的 data fd 与 wake fd 都指向同一 conn）。
 class EventLoop {
 public:
     EventLoop();                                          // epoll_create1，失败抛异常
     ~EventLoop();
 
-    bool add(std::unique_ptr<Channel> ch);                // 拥有一个 Channel（含监听与连接）
+    bool addListenChannel(std::unique_ptr<Channel> ch);   // 拥有监听 Channel
+    bool addConnection(std::unique_ptr<TcpConnection> conn); // 拥有一条业务连接
     void run();                                           // while(true) epoll_wait + 分发
 private:
     int epfd_ = -1;
-    std::unordered_map<int, std::unique_ptr<Channel>> channels_;
+    std::unique_ptr<Channel> listen_;
+    std::unordered_map<int, std::unique_ptr<TcpConnection>> conns_;
 };
 
-EventLoop::EventLoop() : epfd_(::epoll_create1(0)) {
+inline EventLoop::EventLoop() : epfd_(::epoll_create1(0)) {
     if (epfd_ < 0)
         throw std::runtime_error(std::string("epoll_create1 failed: ") + std::strerror(errno));
 }
-EventLoop::~EventLoop() { if (epfd_ >= 0) ::close(epfd_); }
+inline EventLoop::~EventLoop() { if (epfd_ >= 0) ::close(epfd_); }
 
-bool EventLoop::add(std::unique_ptr<Channel> ch) {
+inline bool EventLoop::addListenChannel(std::unique_ptr<Channel> ch) {
     int fd = ch->fd();
     struct epoll_event ev{};
-    ev.events = ch->events();
-    ev.data.fd = fd;
+    ev.events = EPOLLIN | EPOLLET;
+    ev.data.ptr = ch.get();                              // 监听对象指针
     if (::epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev) < 0) return false;
-    channels_.emplace(fd, std::move(ch));   // 拥有它
+    listen_ = std::move(ch);
     return true;
 }
 
-void EventLoop::run() {
+inline bool EventLoop::addConnection(std::unique_ptr<TcpConnection> conn) {
+    int data_fd = conn->fd();
+    int wake_fd = conn->wakeFd();
+    TcpConnection* ptr = conn.get();
+
+    struct epoll_event ev1{};                            // data fd
+    ev1.events = conn->events();                          // EPOLLIN | EPOLLET
+    ev1.data.ptr = ptr;
+    if (::epoll_ctl(epfd_, EPOLL_CTL_ADD, data_fd, &ev1) < 0) return false;
+
+    struct epoll_event ev2{};                            // eventfd（唤醒）
+    ev2.events = EPOLLIN;                                 // LT：计数非 0 就通知，handleWake 读到 EAGAIN
+    ev2.data.ptr = ptr;
+    if (::epoll_ctl(epfd_, EPOLL_CTL_ADD, wake_fd, &ev2) < 0) {
+        ::epoll_ctl(epfd_, EPOLL_CTL_DEL, data_fd, nullptr);
+        return false;
+    }
+
+    conns_.emplace(data_fd, std::move(conn));            // 拥有它
+    return true;
+}
+
+inline void EventLoop::run() {
     struct epoll_event ready[16];
     while (true) {
         int n = ::epoll_wait(epfd_, ready, 16, -1);
@@ -48,15 +75,20 @@ void EventLoop::run() {
             throw std::runtime_error("epoll_wait failed");
         }
         for (int i = 0; i < n; ++i) {
-            int fd = ready[i].data.fd;
-            auto it = channels_.find(fd);
-            if (it == channels_.end()) continue;                 // 残留事件，忽略
-            it->second->handleEvent(ready[i].events);            // 分发（栈帧内可安全执行）
+            void* p = ready[i].data.ptr;
 
-            // —— 事后删除：栈帧已弹出后才删 ——
-            if (it->second->removed()) {
-                ::epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
-                channels_.erase(it);                             // 析构 Channel → 资源随回调闭包释放
+            if (listen_ && p == listen_.get()) {           // 监听 fd
+                listen_->handleEvent(ready[i].events);
+                continue;
+            }
+
+            auto* conn = static_cast<TcpConnection*>(p);   // 业务连接（data 或 wake 触发均指向它）
+            conn->dispatch(ready[i].events, ready[i].data.fd);
+            if (conn->removed()) {
+                // 两个 fd 都从 epoll 摘掉，再析构连接
+                ::epoll_ctl(epfd_, EPOLL_CTL_DEL, conn->fd(),      nullptr);
+                ::epoll_ctl(epfd_, EPOLL_CTL_DEL, conn->wakeFd(),  nullptr);
+                conns_.erase(conn->fd());                // 析构 TcpConnection → Socket/Channel/eventfd 随之释放
             }
         }
     }

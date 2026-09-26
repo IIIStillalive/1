@@ -1,4 +1,4 @@
-// Stage 3: Reactor — EventLoop 只认 Channel；连接业务挂回调闭包
+// Stage 4: Reactor — EventLoop 只做分发；业务在 TcpConnection 里；监听 fd 用 Channel
 #include <cstring>         // memset
 #include <sys/socket.h>    // socket/bind/listen/accept
 #include <netinet/in.h>    // sockaddr_in
@@ -11,6 +11,8 @@
 #include "server/socket.hpp"
 #include "server/channel.hpp"
 #include "server/event_loop.hpp"
+#include "server/tcp_connection.hpp"
+#include "server/thread_pool.hpp"
 
 using namespace server;
 
@@ -18,31 +20,6 @@ inline bool set_nonblocking(int fd) {
     int old_flags = ::fcntl(fd, F_GETFL, 0);
     if (old_flags < 0) return false;
     return ::fcntl(fd, F_SETFL, old_flags | O_NONBLOCK) >= 0;
-}
-
-// 把一个连接 fd 包装成 Channel：回调闭包持有 Socket，EOF/出错时标记移除
-static std::unique_ptr<Channel> makeEchoChannel(int cfd) {
-    auto ch = std::make_unique<Channel>(cfd);
-    Channel* raw = ch.get();                       // 回指自身，仅用于 requestRemoval（标志位，非删除）
-    ch->enableReading();
-    ch->setReadCallback([sock = std::make_shared<Socket>(cfd), raw]() mutable {
-        char buf[4096];
-        while (true) {                              // ET：读到 EAGAIN 为止
-            ssize_t r = ::read(sock->get(), buf, sizeof(buf));
-            if (r > 0) {
-                ::write(sock->get(), buf, static_cast<size_t>(r));   // 回显
-            } else if (r == 0) {
-                raw->requestRemoval();              // 对端关闭：只标记
-                return;
-            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return;                             // 读空，等下次
-            } else {
-                raw->requestRemoval();              // 真错误：只标记
-                return;
-            }
-        }
-    });
-    return ch;
 }
 
 int main() {
@@ -80,11 +57,13 @@ int main() {
     log.log(Level::INFO, "listening on 127.0.0.1:8888");
 
     EventLoop loop;
+    // 共享线程池：所有连接共用，慢任务丢这里，事件线程只做非阻塞分发
+    auto pool = std::make_shared<ThreadPool>(4);
     int lfd_val = lfd.get();
 
-    // 监听 fd → 一个 Channel；accept 到 EAGAIN，把每个新连接注册进 loop
+    // 监听 fd → 一个 Channel；accept 到 EAGAIN，把每个新连接包成 TcpConnection 交给 loop
     auto listen_ch = std::make_unique<Channel>(lfd_val);
-    listen_ch->setReadCallback([&loop, lfd_val]() {
+    listen_ch->setReadCallback([&loop, lfd_val, pool]() {
         while (true) {
             int cfd = ::accept(lfd_val, nullptr, nullptr);
             if (cfd < 0) {
@@ -94,13 +73,13 @@ int main() {
                 return;
             }
             ::set_nonblocking(cfd);              // 连接 fd 也要非阻塞
-            loop.add(makeEchoChannel(cfd));
+            loop.addConnection(std::make_unique<TcpConnection>(cfd, pool));
         }
     });
     listen_ch->enableReading();
-    if (!loop.add(std::move(listen_ch))) {
+    if (!loop.addListenChannel(std::move(listen_ch))) {
         ErrnoGuard eg;
-        log.log(Level::ERROR, "addListener() failed:", eg.message());
+        log.log(Level::ERROR, "addListenChannel() failed:", eg.message());
         return -1;
     }
 

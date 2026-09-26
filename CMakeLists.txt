@@ -32,3 +32,12 @@ add_executable(epoll_probe
 
 target_compile_features(epoll_probe PRIVATE cxx_std_20)
 target_include_directories(epoll_probe PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# ---- 目标：线程池冒烟测试(独立验证 ThreadPool,不参与 server 构建) ----
+add_executable(thread_pool_smoke
+  src/thread_pool_smoke.cpp
+)
+
+target_compile_features(thread_pool_smoke PRIVATE cxx_std_20)
+target_include_directories(thread_pool_smoke PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(thread_pool_smoke PRIVATE pthread)
